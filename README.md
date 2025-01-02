@@ -1,6 +1,377 @@
-# 完全雲端運行：使用Google CoLaboratory訓練神經網路。
-南華大學跨領域-人工智慧期中報告
+卷积神经网络(CNN)实现图片分类
+南華大學跨領域-人工智慧期末報告
 11215015 江英姿 11215025 詹文儀
+本次使用的数据集为food-11数据集，共有11类
+
+数据集的划分为：
+
+Training set: 9866张
+Validation set: 3430张
+Testing set: 3347张
+数据格式 下载 zip 档后解压缩会有三个资料夹，分别为training、validation 以及 testing
+
+training 以及 validation 中的照片名称格式为 [类别]_[编号].jpg，例如 3_100.jpg 即为类别 3 的照片（编号不重要）
+
+对应类别如图1所示：
+
+类别	含义（英）	含义（中）
+0	Bread	面包
+1	Dairy product	乳制品
+2	Dessert	甜点
+3	Egg	蛋类
+4	Fried food	油炸食品
+5	Meat	肉类
+6	Noodles/Pasta	面条/意大利面
+7	Rice	米饭
+8	Seafood	海鲜
+9	Soup	汤
+10	Vegetable/Fruit	蔬菜/水果
+表1 food-11各类别对应食物
+In [1]
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+%matplotlib inline  
+import cv2
+import random
+import paddle
+
+# 选择运行设备
+device = paddle.set_device('cpu')
+# device = paddle.set_device('gpu:0')
+1.2、数据集解压并移动至工作文件夹，并观察数据集
+由于本次实践的数据集稍微比较大，以防出现不好下载的问题，为了提高效率，可以用下面的代码进行数据集的下载。
+
+!unzip -q data/data94114/food-11.zip # 解压缩food-11数据集
+
+!mv  /home/aistudio/food-11 /home/aistudio/work
+
+In [2]
+# !unzip -q data/data94114/food-11.zip # 解压缩food-11数据集
+# !mv  /home/aistudio/food-11 /home/aistudio/work
+In [3]
+# 观察样本
+img = cv2.imread('work/food-11/training/0_110.jpg')
+plt.imshow(img[:,:,::-1])
+plt.show()
+
+<Figure size 640x480 with 1 Axes>
+1.3 图像预处理
+在图像预处理中，我们定义一个名为preprocess的函数，并做如下预处理：
+
+图像尺寸调整：蒋图像尺寸调整为128*128像素，确保输入图像具有相同尺寸；
+随机翻转（仅用于训练）：为了使数据更加丰富，从而让模型效果更好；
+数据标准化：将图像转换为numpy数组，并使其归一化；
+更改数组形状：以符合CNN的输入要求
+In [4]
+def preprocess(img,mode='train'):
+    img = cv2.resize(img,(128,128))
+    # 在训练集中随机对数据进行flip操作
+    if mode == 'train':
+        if random.randint(0,1): # 随机进行预处理
+            img = cv2.flip(img,random.randint(-1,1))  # flip操作模式随机选择
+    # 转换为numpy数组
+    img = np.array(img).astype('float32')
+    # 将数据范围改为0-1
+    img = img / 255.
+    # 最后更改数组的shape，使其符合CNN输入要求
+    return img.transpose((2,0,1))
+1.4 数据读取
+定义了一个用于处理食物分类任务的自定义数据集类 FoodDataSet，并使用这个类来创建训练和评估（验证）的数据加载器（DataLoader），并读取数据。
+
+注：FoodDataSet类所继承的paddle.io.Dataset类为官方建议的数据集类型，可以直接在官方训练方法fit()中使用，API文档见：Dataset。DataLoader可以返回一个迭代器，其支持单进程和多进程的数据加载方式，在数据量较大的时候比较有利。
+
+In [5]
+class FoodDataSet(paddle.io.Dataset):
+    def __init__(self,data_dir,mode):
+        # 获取文件夹下数据名称列表
+        self.filenames = os.listdir(data_dir)
+        self.data_dir = data_dir
+        self.mode = mode
+    def __getitem__(self,index):
+        file_name = self.data_dir + self.filenames[index]
+        # 读取数据
+        img = cv2.imread(file_name)
+        # 预处理
+        img = preprocess(img,mode = self.mode)
+        # 获得标签
+        label = int(self.filenames[index].split('_')[0]) 
+        return img,label
+    def __len__(self):
+        return len(self.filenames)
+
+train_dataset = FoodDataSet('work/food-11/training/','train')
+train_loader = paddle.io.DataLoader(train_dataset, places=paddle.CPUPlace(), batch_size=64, shuffle=True)
+eval_dataset = FoodDataSet('work/food-11/validation/','validation')
+eval_loader = paddle.io.DataLoader(eval_dataset, places=paddle.CPUPlace(), batch_size=64, shuffle=True)
+2、模型构建（网络配置）
+首先定义网络结构，这里选择的LeNet()模型。LeNet 是一个经典的卷积神经网络（CNN）架构，最初由 Yann LeCun 等人在1990年代提出，用于手写数字识别（如 MNIST 数据集）。本示例中的 LeNet 模型基于原始的 LeNet 结构进行了适度的修改，以适应更通用的图像分类任务，特别是针对具有更多类别（如11类）的数据集。该模型使用 PaddlePaddle 深度学习框架实现。
+
+LeNet 模型主要由以下几个部分组成：
+
+卷积层（Convolutional Layers）：
+Conv0：第一个卷积层，输入通道数为3（适用于RGB图像），输出通道数为10，卷积核大小为5x5，步长为1，使用SAME填充策略以保持特征图尺寸不变。
+
+Conv1：第二个卷积层，输入通道数为10，输出通道数为20，卷积核大小为5x5，步长为1，同样使用SAME填充。
+
+Conv2：第三个卷积层，输入通道数为20，输出通道数为50，卷积核大小为5x5，步长为1，SAME填充。
+
+池化层（Pooling Layers）：
+每个卷积层后都跟有一个最大池化层（MaxPool2D），池化核大小为2x2，步长为2，用于减少特征图的尺寸和参数数量，同时提高模型的泛化能力。
+
+全连接层（Fully Connected Layers）：
+FC1：第一个全连接层，将卷积层输出的特征图展平后作为输入，输出特征维度为256。
+
+FC2：第二个全连接层，输入特征维度为256，输出特征维度为64。
+
+FC3：第三个全连接层，即输出层，输入特征维度为64，输出特征维度为11，对应于11个类别的分类任务。
+
+激活函数：
+在每个卷积层和前两个全连接层后使用 Leaky ReLU 激活函数，以引入非线性因素，提高模型的表达能力。
+
+在输出层使用 Softmax 激活函数，将输出转换为概率分布，便于进行多分类任务。
+
+In [6]
+class LeNet(paddle.nn.Layer):
+    def __init__(self):
+        super(LeNet,self).__init__()
+
+        self.conv0 = paddle.nn.Conv2D(in_channels=3,out_channels=10,kernel_size=5,padding="SAME",stride=1)
+        self.pool0 = paddle.nn.MaxPool2D(kernel_size=2,stride=2) # 128 * 128 -> 64 * 64
+
+        self.conv1 = paddle.nn.Conv2D(in_channels=10,out_channels=20,kernel_size=5,padding="SAME",stride=1)
+        self.pool1 = paddle.nn.MaxPool2D(kernel_size=2,stride=2) # 64 * 64 -> 32 * 32
+
+        self.conv2 = paddle.nn.Conv2D(in_channels=20,out_channels=50,kernel_size=5,padding="SAME",stride=1)
+        self.pool2 = paddle.nn.MaxPool2D(kernel_size=2,stride=2) # 32 * 32 -> 16 * 16
+
+        self.fc1 = paddle.nn.Linear(in_features=12800,out_features=256)
+        self.fc2 = paddle.nn.Linear(in_features=256,out_features=64)
+        self.fc3 = paddle.nn.Linear(in_features=64,out_features=11)
+    
+    def forward(self,x):
+        x = self.conv0(x)
+        x = paddle.nn.functional.leaky_relu(x)
+        x = self.pool0(x)
+
+        x = self.conv1(x)
+        x = paddle.nn.functional.leaky_relu(x)
+        x = self.pool1(x)
+
+        x = self.conv2(x)
+        x = paddle.nn.functional.leaky_relu(x)
+        x = self.pool2(x)
+
+        x = paddle.reshape(x,[x.shape[0],-1])
+
+        x = self.fc1(x)
+        x = paddle.nn.functional.leaky_relu(x)
+        x = self.fc2(x)
+        x = paddle.nn.functional.leaky_relu(x)
+        x = self.fc3(x)
+        x = paddle.nn.functional.softmax(x)
+        return x
+network = LeNet()
+查看模型结构
+In [7]
+paddle.summary(network, (1,3,128,128))
+---------------------------------------------------------------------------
+ Layer (type)       Input Shape          Output Shape         Param #    
+===========================================================================
+   Conv2D-1      [[1, 3, 128, 128]]   [1, 10, 128, 128]         760      
+  MaxPool2D-1   [[1, 10, 128, 128]]    [1, 10, 64, 64]           0       
+   Conv2D-2      [[1, 10, 64, 64]]     [1, 20, 64, 64]         5,020     
+  MaxPool2D-2    [[1, 20, 64, 64]]     [1, 20, 32, 32]           0       
+   Conv2D-3      [[1, 20, 32, 32]]     [1, 50, 32, 32]        25,050     
+  MaxPool2D-3    [[1, 50, 32, 32]]     [1, 50, 16, 16]           0       
+   Linear-1         [[1, 12800]]           [1, 256]          3,277,056   
+   Linear-2          [[1, 256]]            [1, 64]            16,448     
+   Linear-3          [[1, 64]]             [1, 11]              715      
+===========================================================================
+Total params: 3,325,049
+Trainable params: 3,325,049
+Non-trainable params: 0
+---------------------------------------------------------------------------
+Input size (MB): 0.19
+Forward/backward pass size (MB): 2.83
+Params size (MB): 12.68
+Estimated Total Size (MB): 15.71
+---------------------------------------------------------------------------
+
+{'total_params': 3325049, 'trainable_params': 3325049}
+3、 模型训练
+如果发现运行时间较长，可以将epoch（训练总轮次）降低，但这样会导致训练结果变差。
+
+In [8]
+model = paddle.Model(network)
+
+model.prepare(paddle.optimizer.Adam(learning_rate=0.0001, parameters=model.parameters()), 
+              paddle.nn.CrossEntropyLoss(), 
+              paddle.metric.Accuracy())
+
+visualdl = paddle.callbacks.VisualDL(log_dir='visualdl_log')
+
+# 启动模型全流程训练
+model.fit(train_loader,  # 训练数据集
+          eval_loader,   # 评估数据集
+          epochs=30,       # 训练的总轮次
+          batch_size=64,  # 训练使用的批大小
+          verbose=1,      # 日志展示形式
+          callbacks=[visualdl])  # 设置可视化
+The loss value printed in the log is the current step, and the metric is the average value of previous steps.
+Epoch 1/30
+step 155/155 [==============================] - loss: 2.4318 - acc: 0.1951 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.3413 - acc: 0.2044 - 621ms/step          
+Eval samples: 3430
+Epoch 2/30
+step 155/155 [==============================] - loss: 2.3207 - acc: 0.2214 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.3530 - acc: 0.2172 - 618ms/step          
+Eval samples: 3430
+Epoch 3/30
+step 155/155 [==============================] - loss: 2.1491 - acc: 0.2251 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.3826 - acc: 0.2300 - 621ms/step          
+Eval samples: 3430
+Epoch 4/30
+step 155/155 [==============================] - loss: 2.2994 - acc: 0.2316 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.2151 - acc: 0.2312 - 595ms/step          
+Eval samples: 3430
+Epoch 5/30
+step 155/155 [==============================] - loss: 2.3592 - acc: 0.2366 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.1528 - acc: 0.2353 - 612ms/step          
+Eval samples: 3430
+Epoch 6/30
+step 155/155 [==============================] - loss: 2.2438 - acc: 0.2419 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.4641 - acc: 0.2350 - 615ms/step          
+Eval samples: 3430
+Epoch 7/30
+step 155/155 [==============================] - loss: 2.1917 - acc: 0.2442 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.2508 - acc: 0.2382 - 614ms/step          
+Eval samples: 3430
+Epoch 8/30
+step 155/155 [==============================] - loss: 2.3497 - acc: 0.2458 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.3744 - acc: 0.2417 - 612ms/step          
+Eval samples: 3430
+Epoch 9/30
+step 155/155 [==============================] - loss: 2.1516 - acc: 0.2507 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.3154 - acc: 0.2388 - 613ms/step          
+Eval samples: 3430
+Epoch 10/30
+step 155/155 [==============================] - loss: 2.3362 - acc: 0.2510 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.3045 - acc: 0.2388 - 592ms/step          
+Eval samples: 3430
+Epoch 11/30
+step 155/155 [==============================] - loss: 2.3292 - acc: 0.2554 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.2595 - acc: 0.2417 - 597ms/step          
+Eval samples: 3430
+Epoch 12/30
+step 155/155 [==============================] - loss: 2.1593 - acc: 0.2648 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.3055 - acc: 0.2627 - 597ms/step          
+Eval samples: 3430
+Epoch 13/30
+step 155/155 [==============================] - loss: 2.2378 - acc: 0.2759 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.3169 - acc: 0.2694 - 607ms/step          
+Eval samples: 3430
+Epoch 14/30
+step 155/155 [==============================] - loss: 2.4284 - acc: 0.2885 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.2588 - acc: 0.2638 - 597ms/step          
+Eval samples: 3430
+Epoch 15/30
+step 155/155 [==============================] - loss: 2.3275 - acc: 0.2961 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.2283 - acc: 0.2776 - 599ms/step          
+Eval samples: 3430
+Epoch 16/30
+step 155/155 [==============================] - loss: 2.1556 - acc: 0.2958 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.2509 - acc: 0.2796 - 606ms/step          
+Eval samples: 3430
+Epoch 17/30
+step 155/155 [==============================] - loss: 2.3291 - acc: 0.3087 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.2250 - acc: 0.2790 - 613ms/step          
+Eval samples: 3430
+Epoch 18/30
+step 155/155 [==============================] - loss: 2.3184 - acc: 0.3135 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.2014 - acc: 0.2793 - 621ms/step          
+Eval samples: 3430
+Epoch 19/30
+step 155/155 [==============================] - loss: 2.0596 - acc: 0.3166 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.2324 - acc: 0.2799 - 591ms/step          
+Eval samples: 3430
+Epoch 20/30
+step 155/155 [==============================] - loss: 2.1381 - acc: 0.3185 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.2198 - acc: 0.2851 - 605ms/step          
+Eval samples: 3430
+Epoch 21/30
+step 155/155 [==============================] - loss: 2.2388 - acc: 0.3208 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.1962 - acc: 0.2784 - 608ms/step          
+Eval samples: 3430
+Epoch 22/30
+step 155/155 [==============================] - loss: 2.4273 - acc: 0.3234 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.2545 - acc: 0.2878 - 592ms/step          
+Eval samples: 3430
+Epoch 23/30
+step 155/155 [==============================] - loss: 1.8778 - acc: 0.3329 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.1583 - acc: 0.2883 - 608ms/step          
+Eval samples: 3430
+Epoch 24/30
+step 155/155 [==============================] - loss: 2.3336 - acc: 0.3360 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.2658 - acc: 0.2927 - 582ms/step          
+Eval samples: 3430
+Epoch 25/30
+step 155/155 [==============================] - loss: 1.8549 - acc: 0.3497 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.3349 - acc: 0.2991 - 609ms/step          
+Eval samples: 3430
+Epoch 26/30
+step 155/155 [==============================] - loss: 1.9650 - acc: 0.3569 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.3495 - acc: 0.3102 - 610ms/step          
+Eval samples: 3430
+Epoch 27/30
+step 155/155 [==============================] - loss: 2.2597 - acc: 0.3616 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.1653 - acc: 0.3041 - 595ms/step          
+Eval samples: 3430
+Epoch 28/30
+step 155/155 [==============================] - loss: 2.1626 - acc: 0.3702 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.3113 - acc: 0.2985 - 597ms/step          
+Eval samples: 3430
+Epoch 29/30
+step 155/155 [==============================] - loss: 1.9490 - acc: 0.3766 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.2044 - acc: 0.3117 - 610ms/step          
+Eval samples: 3430
+Epoch 30/30
+step 155/155 [==============================] - loss: 2.2298 - acc: 0.3851 - 2s/step          
+Eval begin...
+step 54/54 [==============================] - loss: 2.0697 - acc: 0.3321 - 606ms/step          
+Eval samples: 3430
+代码解释
+In [12]
+model.save('model/LeNet') 
 # CoLaboratory 訓練神經網路
 
 本文旨在展示如何使用CoLaboratory 訓練神經網路。我們將展示一個在威斯康辛乳癌資料集上訓練神經網路的範例，資料集可在UCI Machine Learning Repository（http://archive.ics.uci.edu/ml/datasets） 取得。本文的範例相對比較簡單。
